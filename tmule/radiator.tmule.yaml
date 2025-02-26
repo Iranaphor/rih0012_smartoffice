@@ -1,0 +1,36 @@
+---
+session: rih0012_radiator_controller
+init_cmd: |
+  #exec /bin/bash
+  cd @TMULE_CONFIG_DIR@ || true
+  set -o pipefail
+
+  # Source the .bashrc
+  source $HOME/.bashrc
+
+  # Define environment variables
+  export TEMPERGOLD_DEV='/dev/tempergold'
+  export SWITCHBOT_MAC='CE:2A:46:46:22:76'
+
+  # Define ROS2 environment variables
+  export ROS_DOMAIN_ID=0
+  export ROS_LOCALHOST_ONLY=1
+  export DISPLAY=:0
+
+  # Source the environment variables for the scenario
+  clear -x
+
+windows:
+- name: temp
+  panes:
+  - ros2 run temper_ros2 publish_readings.py
+  - ros2 topic echo /temperature sensor_msgs/msg/Temperature
+
+- name: switch
+  panes:
+  - ros2 run switchbot_ros2 control_bot.py
+  - ros2 topic echo /command std_msgs/msg/String
+
+- name: smart
+  panes:
+  - ros2 run rih0012_smartoffice smart.py

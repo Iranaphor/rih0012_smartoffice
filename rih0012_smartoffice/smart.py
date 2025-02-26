@@ -20,10 +20,11 @@ class TemperatureController(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             depth=1
         )
+        self.last_method = ''
         self.publisher = self.create_publisher(String, '/command', qos_profile)
 
         self.lower_threshold = 24.0  # Adjust as needed
-        self.upper_threshold = 28.0  # Adjust as needed
+        self.upper_threshold = 25.0  # Adjust as needed
         self.last_publish_time = 0
         self.publish_interval = 30  # seconds
 
@@ -34,14 +35,22 @@ class TemperatureController(Node):
         if current_time - self.last_publish_time < self.publish_interval:
             return  # Skip if within the interval
 
+        # Select appropriate action
         temperature = msg.temperature
         if temperature < self.lower_threshold:
             command = "on"
         elif temperature > self.upper_threshold:
             command = "off"
         else:
-            return  # Do nothing if within the threshold range
+            # Do nothing if within the threshold range
+            return
 
+        # Do nothing if command is same as last time
+        if command == self.last_method:
+            return
+        self.last_method = command
+
+        # Publish message
         command_msg = String()
         command_msg.data = command
         self.publisher.publish(command_msg)
