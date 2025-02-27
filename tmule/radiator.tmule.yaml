@@ -13,7 +13,7 @@ init_cmd: |
   export SWITCHBOT_MAC='CE:2A:46:46:22:76'
 
   # Define ROS2 environment variables
-  export ROS_DOMAIN_ID=0
+  export ROS_DOMAIN_ID=100
   export ROS_LOCALHOST_ONLY=1
   export DISPLAY=:0
 
@@ -34,3 +34,14 @@ windows:
 - name: smart
   panes:
   - ros2 run rih0012_smartoffice smart.py
+
+- name: visuals
+  panes:
+  - rviz2
+  - ros2 run rih0012_smartoffice visualise.py
+
+- name: debug
+  panes:
+  - ros2 topic list
+  - ros2 topic list
+  - ros2 topic list

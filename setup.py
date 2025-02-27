@@ -21,7 +21,8 @@ setup(
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
-            'smart.py = rih0012_smartoffice.smart:main'
+            'smart.py = rih0012_smartoffice.smart:main',
+            'visualise.py = rih0012_smartoffice.visualise:main'
         ],
     },
 )

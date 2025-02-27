@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 from sensor_msgs.msg import Temperature
 import time
 from datetime import datetime
@@ -9,6 +9,7 @@ from datetime import datetime
 class TemperatureController(Node):
     def __init__(self):
         super().__init__('temperature_controller')
+
         self.subscription = self.create_subscription(
             Temperature,
             '/temperature',
@@ -25,14 +26,29 @@ class TemperatureController(Node):
 
         self.lower_threshold = 24.0  # Adjust as needed
         self.upper_threshold = 25.0  # Adjust as needed
+        self.get_logger().info(f'TemperatureController lower_threshold set at {self.lower_threshold}')
+        self.get_logger().info(f'TemperatureController upper_threshold set at {self.upper_threshold}')
+        self.lower_sub = self.create_subscription(Float32, 'lower_threshold', self.setmin_cb, 10)
+        self.upper_sub = self.create_subscription(Float32, 'upper_threshold', self.setmax_cb, 10)
+
         self.last_publish_time = 0
         self.publish_interval = 30  # seconds
+        self.repeat_message_override_timeout = self.publish_interval * 10
 
         self.get_logger().info('TemperatureController node initialized')
 
+    def setmin_cb(self, msg):
+        self.get_logger().info(f'TemperatureController lower_threshold moved from {self.lower_threshold} to {msg.data}')
+        self.lower_threshold = msg.data
+
+    def setmax_cb(self, msg):
+        self.get_logger().info(f'TemperatureController upper_threshold moved from {self.upper_threshold} to {msg.data}')
+        self.upper_threshold = msg.data
+
     def temperature_callback(self, msg):
         current_time = time.time()
-        if current_time - self.last_publish_time < self.publish_interval:
+        time_since_publish = current_time - self.last_publish_time
+        if time_since_publish < self.publish_interval:
             return  # Skip if within the interval
 
         # Select appropriate action
@@ -47,8 +63,11 @@ class TemperatureController(Node):
 
         # Do nothing if command is same as last time
         if command == self.last_method:
-            return
+            # Unless it has been a while
+            if time_since_publish < self.repeat_message_override_timeout:
+                return
         self.last_method = command
+
 
         # Publish message
         command_msg = String()
