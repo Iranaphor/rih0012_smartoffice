@@ -2,62 +2,111 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Temperature, PointCloud2, PointField
 from std_msgs.msg import String
+import os
+import csv
 import struct
 
-class DualTemperaturePlot(Node):
+class TripleTemperaturePlot(Node):
     def __init__(self):
-        super().__init__('dual_temperature_plot')
+        super().__init__('triple_temperature_plot')
 
-        # Subscriptions
+        # ------------------- File / Log Setup -------------------
+        self.log_filename = "plot_data_log.csv"
+        self.all_data = []  # holds (time, temperature, command, is_first_point)
+
+        # Load existing CSV to restore any previous "lifetime" data
+        self._load_previous_data()
+
+        # ------------------- ROS Setup -------------------
         self.temp_sub = self.create_subscription(
             Temperature,
-            '/temperature',  # adjust if needed
+            '/temperature',
             self._temp_callback,
             10
         )
         self.cmd_sub = self.create_subscription(
             String,
-            '/command',      # adjust if needed
+            '/command',
             self._cmd_callback,
             10
         )
 
-        # Publisher
         self.cloud_pub = self.create_publisher(PointCloud2, 'temperature_plot', 10)
-
-        # Publish timer (1 Hz)
         self.timer_ = self.create_timer(1.0, self._publish_callback)
 
-        # Track the node start time (for long‐term data)
+        # Node start time (not strictly required but available)
         self.start_time = self.get_clock().now().nanoseconds * 1.0e-9
 
-        # Store all temperature readings:
-        # (time, temperature, command_string, is_first_after_command)
-        self.all_data = []
-
-        # Latch the last command (default off).
-        # Also track if the next temperature reading is the first after a command.
+        # Current command, next reading is "first" after command change
         self.last_command = "off"
         self.awaiting_first_point = False
 
-        # 30 min short‐term window (in seconds)
-        self.short_term_window = 1800.0
+        # ------------------- Time Windows -------------------
+        # 1) Short term: 30 minutes
+        self.short_term_window = 30.0 * 60.0   # 1800 seconds
+        # 2) Medium term: 6 hours
+        self.mid_term_window = 6.0 * 3600.0    # 21600 seconds
 
-        # Define bounding boxes for short vs. long data
+        # ------------------- Bounding Boxes -------------------
         # Format: (xmin, xmax, ymin, ymax)
-        self.bbox_short = (-2.1, -0.1, -1.0, 1.0)
-        self.bbox_long  = ( 0.1,  2.1, -1.0, 1.0)
+        # A) Short-term
+        self.bbox_short = (-2.1, -0.1, -1.0,  1.0)
+        # B) Medium-term
+        self.bbox_mid   = ( 0.1,  2.1, -1.0,  1.0)
+        # C) Lifetime
+        self.bbox_life  = (-2.1,  2.1, -1.7, -1.2)
 
-        # Pre‐create black line points for each bounding box
-        self.bbox_packed_points_short = self._create_bbox_line_points(*self.bbox_short)
-        self.bbox_packed_points_long  = self._create_bbox_line_points(*self.bbox_long)
+        # Pre-create black line points for each box
+        self.bbox_packed_short = self._create_bbox_line_points(*self.bbox_short)
+        self.bbox_packed_mid   = self._create_bbox_line_points(*self.bbox_mid)
+        self.bbox_packed_life  = self._create_bbox_line_points(*self.bbox_life)
 
-        self.get_logger().info("DualTemperaturePlot node started.")
+        self.get_logger().info("TripleTemperaturePlot node started.")
 
+    # ------------------- Data Loading / Saving -------------------
+    def _load_previous_data(self):
+        """Load any existing CSV with: time, temperature, command, is_first(0/1)."""
+        if not os.path.exists(self.log_filename):
+            return
+
+        try:
+            with open(self.log_filename, 'r') as f:
+                reader = csv.reader(f)
+                count = 0
+                for row in reader:
+                    if len(row) != 4:
+                        continue
+                    t_str, temp_str, cmd_str, first_str = row
+                    t_val = float(t_str)
+                    temp_val = float(temp_str)
+                    cmd_val = cmd_str.strip()
+                    first_val = (first_str.strip() == '1')
+                    self.all_data.append((t_val, temp_val, cmd_val, first_val))
+                    count += 1
+            self.get_logger().info(f"Loaded {count} data rows from {self.log_filename}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to load {self.log_filename}: {e}")
+
+    def _append_to_log_file(self, t_val, temperature, command, is_first):
+        """
+        Append a single line to CSV: time, temperature, command, is_first(0/1).
+        """
+        try:
+            with open(self.log_filename, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    f"{t_val}",
+                    f"{temperature}",
+                    command,
+                    '1' if is_first else '0'
+                ])
+        except Exception as e:
+            self.get_logger().error(f"Could not append to {self.log_filename}: {e}")
+
+    # ------------------- Subscription Callbacks -------------------
     def _cmd_callback(self, msg):
         """
-        Latch the command ("on"/"off") and mark that the next temperature reading
-        is the first after the command changed (for special coloring).
+        Latch the command ("on"/"off") => next Temperature is flagged as 'first_after_cmd'.
         """
         cmd = msg.data.strip().lower()
         if cmd in ("on", "off"):
@@ -69,8 +118,7 @@ class DualTemperaturePlot(Node):
 
     def _temp_callback(self, msg):
         """
-        On each Temperature, store: (time, temperature, latched_command, is_first_point).
-        Then reset `awaiting_first_point` if needed.
+        On each Temperature, record (time, temp, command, is_first) and append to CSV.
         """
         t_now = self.get_clock().now().nanoseconds * 1.0e-9
         is_first = self.awaiting_first_point
@@ -78,40 +126,47 @@ class DualTemperaturePlot(Node):
             self.awaiting_first_point = False
 
         self.all_data.append((t_now, msg.temperature, self.last_command, is_first))
+        self._append_to_log_file(t_now, msg.temperature, self.last_command, is_first)
+
         self.get_logger().info(
-            f"Received Temperature={msg.temperature:.2f}, cmd='{self.last_command}', "
+            f"Received Temp={msg.temperature:.2f}, cmd='{self.last_command}', "
             f"{'(first_after_cmd)' if is_first else ''}"
         )
 
+    # ------------------- Main Publish Timer -------------------
     def _publish_callback(self):
         """
-        Publish a PointCloud2 containing:
-          - black bounding box lines for short‐ and long‐term boxes
-          - short‐term data (last 30 min) mapped into left box
-          - long‐term data (all since start) mapped into right box
-          - color by temperature (blue→red), except the first point after /command:
-            => black if command=off, green if command=on
-          - if 'is_first_point' => elevate z by 0.01 for clarity
+        Publish a PointCloud2 with:
+          - short-term data (last 30min)
+          - medium-term data (last 6hr)
+          - lifetime data (all)
+        in three bounding boxes, using fixed padding in both x and y (0.1).
         """
         if not self.all_data:
             return
 
         now_sec = self.get_clock().now().nanoseconds * 1.0e-9
 
-        # 1) Split short‐term data vs. long‐term
+        # 1) short-term data
         st_data = [
-            (t, temp, cmd, first) 
+            (t, temp, cmd, first)
             for (t, temp, cmd, first) in self.all_data
-            if t >= (now_sec - self.short_term_window)
+            if t >= now_sec - self.short_term_window
         ]
-        lt_data = self.all_data  # everything
+        # 2) medium-term data
+        mt_data = [
+            (t, temp, cmd, first)
+            for (t, temp, cmd, first) in self.all_data
+            if t >= now_sec - self.mid_term_window
+        ]
+        # 3) lifetime data
+        lt_data = self.all_data
 
-        if not st_data and not lt_data:
+        if not (st_data or mt_data or lt_data):
             return
 
-        # 2) Determine the min/max time & temperature in each data set
+        # Min/max for each subset
         def get_min_max(data_list):
-            # returns (time_min, time_max, temp_min, temp_max)
             if not data_list:
                 return (0.0, 1.0, 0.0, 1.0)
             t_vals = [d[0] for d in data_list]
@@ -119,116 +174,115 @@ class DualTemperaturePlot(Node):
             return (min(t_vals), max(t_vals), min(temp_vals), max(temp_vals))
 
         st_tmin, st_tmax, st_temp_min, st_temp_max = get_min_max(st_data)
+        mt_tmin, mt_tmax, mt_temp_min, mt_temp_max = get_min_max(mt_data)
         lt_tmin, lt_tmax, lt_temp_min, lt_temp_max = get_min_max(lt_data)
 
-        # 3) Build the final list of points
+        # Start building the point list
         packed_points = []
-        packed_points.extend(self.bbox_packed_points_short)
-        packed_points.extend(self.bbox_packed_points_long)
+        # Add bounding-box lines
+        packed_points.extend(self.bbox_packed_short)
+        packed_points.extend(self.bbox_packed_mid)
+        packed_points.extend(self.bbox_packed_life)
 
-        # bounding boxes with 5% padding
+        # --------------- Fixed 0.1 Padding in x & y ---------------
+        def pad_dim(low, high, pad=0.1):
+            """
+            Shift boundary by pad on each side.
+            If the dimension < 2*pad, fallback to a minimal gap of 0.01 each side.
+            """
+            dim = high - low
+            if dim <= 2*pad:
+                # fallback
+                return (low + 0.01, high - 0.01)
+            return (low + pad, high - pad)
+
+        # short box
         st_xmin, st_xmax, st_ymin, st_ymax = self.bbox_short
-        st_xmin_eff, st_xmax_eff = self._pad_range(st_xmin, st_xmax, 0.05)
-        st_ymin_eff, st_ymax_eff = self._pad_range(st_ymin, st_ymax, 0.05)
+        st_xmin_eff, st_xmax_eff = pad_dim(st_xmin, st_xmax, 0.1)
+        st_ymin_eff, st_ymax_eff = pad_dim(st_ymin, st_ymax, 0.1)
 
-        lt_xmin, lt_xmax, lt_ymin, lt_ymax = self.bbox_long
-        lt_xmin_eff, lt_xmax_eff = self._pad_range(lt_xmin, lt_xmax, 0.05)
-        lt_ymin_eff, lt_ymax_eff = self._pad_range(lt_ymin, lt_ymax, 0.05)
+        # medium box
+        mt_xmin, mt_xmax, mt_ymin, mt_ymax = self.bbox_mid
+        mt_xmin_eff, mt_xmax_eff = pad_dim(mt_xmin, mt_xmax, 0.1)
+        mt_ymin_eff, mt_ymax_eff = pad_dim(mt_ymin, mt_ymax, 0.1)
 
-        # 4) Add points for short‐term data
+        # lifetime box
+        lf_xmin, lf_xmax, lf_ymin, lf_ymax = self.bbox_life
+        lf_xmin_eff, lf_xmax_eff = pad_dim(lf_xmin, lf_xmax, 0.1)
+        lf_ymin_eff, lf_ymax_eff = pad_dim(lf_ymin, lf_ymax, 0.1)
+
+        # ---------- short-term data ----------
         for (t, temp, cmd, first_pt) in st_data:
             x = self._linear_map(t, st_tmin, st_tmax, st_xmin_eff, st_xmax_eff)
             y = self._linear_map(temp, st_temp_min, st_temp_max, st_ymin_eff, st_ymax_eff)
-            # If this is the first point after a command, elevate it slightly
             z = 0.01 if first_pt else 0.0
+            rgb = self._decide_rgb(temp, st_temp_min, st_temp_max, cmd, first_pt)
+            packed_points.append(struct.pack('ffff', x, y, z, rgb))
 
-            color = self._decide_color(temp, st_temp_min, st_temp_max, cmd, first_pt)
-            rgb_float = self._pack_rgb_to_float(*color)
+        # ---------- medium-term data ----------
+        for (t, temp, cmd, first_pt) in mt_data:
+            x = self._linear_map(t, mt_tmin, mt_tmax, mt_xmin_eff, mt_xmax_eff)
+            y = self._linear_map(temp, mt_temp_min, mt_temp_max, mt_ymin_eff, mt_ymax_eff)
+            z = 0.01 if first_pt else 0.0
+            rgb = self._decide_rgb(temp, mt_temp_min, mt_temp_max, cmd, first_pt)
+            packed_points.append(struct.pack('ffff', x, y, z, rgb))
 
-            point_bytes = struct.pack('ffff', x, y, z, rgb_float)
-            packed_points.append(point_bytes)
-
-        # 5) Add points for long‐term data
+        # ---------- lifetime data ----------
         for (t, temp, cmd, first_pt) in lt_data:
-            x = self._linear_map(t, lt_tmin, lt_tmax, lt_xmin_eff, lt_xmax_eff)
-            y = self._linear_map(temp, lt_temp_min, lt_temp_max, lt_ymin_eff, lt_ymax_eff)
-            z = 0.01 if first_pt else 0.0  # same logic
+            x = self._linear_map(t, lt_tmin, lt_tmax, lf_xmin_eff, lf_xmax_eff)
+            y = self._linear_map(temp, lt_temp_min, lt_temp_max, lf_ymin_eff, lf_ymax_eff)
+            z = 0.01 if first_pt else 0.0
+            rgb = self._decide_rgb(temp, lt_temp_min, lt_temp_max, cmd, first_pt)
+            packed_points.append(struct.pack('ffff', x, y, z, rgb))
 
-            color = self._decide_color(temp, lt_temp_min, lt_temp_max, cmd, first_pt)
-            rgb_float = self._pack_rgb_to_float(*color)
-
-            point_bytes = struct.pack('ffff', x, y, z, rgb_float)
-            packed_points.append(point_bytes)
-
-        # 6) Build and publish the PointCloud2
+        # Build and publish the PointCloud2
         pc_msg = self._create_pointcloud2(packed_points)
         self.cloud_pub.publish(pc_msg)
         self.get_logger().info(
-            f"Published pointcloud: short={len(st_data)} pts, long={len(lt_data)} pts"
+            f"Published pointcloud: short={len(st_data)} pts, "
+            f"mid={len(mt_data)} pts, life={len(lt_data)} pts"
         )
 
-    # -----------------------------------------------
-    # Helper methods
-    # -----------------------------------------------
-    def _decide_color(self, temp, tmin, tmax, cmd, is_first_point):
+    # ------------------- Helper Methods -------------------
+    def _decide_rgb(self, temp, tmin, tmax, cmd, is_first):
         """
-        Decide the (r,g,b) color for a given reading.
-         - If this reading is the *first* after a command:
-             => black if cmd='off', green if cmd='on'
-         - Otherwise, color by temperature from blue(0,0,255) to red(255,0,0).
+        Return a float 'rgb':
+          - If first after cmd => green if cmd='on', black if cmd='off'
+          - Else => blue->red gradient based on temp
         """
-        if is_first_point:
+        if is_first:
             if cmd == "on":
-                return (0, 255, 0)   # green
+                return self._pack_rgb_to_float(0, 255, 0)  # green
             else:
-                return (0, 0, 0)     # black
+                return self._pack_rgb_to_float(0, 0, 0)    # black
 
-        # Otherwise, do a blue→red gradient
         if abs(tmax - tmin) < 1e-9:
             frac = 0.5
         else:
             frac = (temp - tmin) / (tmax - tmin)
             frac = max(0.0, min(1.0, frac))
-
-        # Interpolate from (0,0,255) -> (255,0,0)
+        # linear interpolation: blue(0,0,255)->red(255,0,0)
         r = int(frac * 255)
         g = 0
         b = int((1.0 - frac) * 255)
-        return (r, g, b)
+        return self._pack_rgb_to_float(r, g, b)
 
     def _pack_rgb_to_float(self, r, g, b):
-        """
-        Pack three 8-bit channels (r,g,b) into a single float 'rgb'
-        as done in typical PCL / RViz usage:
-          uint32_t rgb = ( (r << 16) | (g << 8) | (b) );
-          float rgb_float = reinterpret_cast<float&>(rgb);
-        """
-        rgb_int = (r << 16) | (g << 8) | (b)
+        """Convert (r,g,b) in [0..255] to a single float 'rgb' (PCL style)."""
+        rgb_int = (r << 16) | (g << 8) | b
         return struct.unpack('!f', struct.pack('!I', rgb_int))[0]
 
     def _linear_map(self, val, in_min, in_max, out_min, out_max):
-        """Safely map val from [in_min, in_max] to [out_min, out_max]."""
+        """Map val from [in_min..in_max] to [out_min..out_max], handle degenerate range."""
         if abs(in_max - in_min) < 1e-9:
-            return 0.5 * (out_min + out_max)
+            return 0.5*(out_min + out_max)
         ratio = (val - in_min) / (in_max - in_min)
         return out_min + ratio * (out_max - out_min)
 
-    def _pad_range(self, mn, mx, frac=0.05):
-        """
-        Returns a slightly shrunken [mn..mx] so the data doesn't
-        exactly touch bounding box edges (5% by default).
-        """
-        if mx <= mn:
-            return (mn, mx)
-        span = mx - mn
-        offset = span * frac
-        return (mn + offset, mx - offset)
-
     def _create_pointcloud2(self, packed_points):
         """
-        Build a PointCloud2 with:
-          x, y, z, rgb (each float32)
-        so that RViz can use the 'RGB' transformer.
+        Return a PointCloud2 with (x,y,z,rgb) as float32.
+        That way RViz can display color with 'RGB8'.
         """
         pc_msg = PointCloud2()
         pc_msg.header.stamp = self.get_clock().now().to_msg()
@@ -237,7 +291,6 @@ class DualTemperaturePlot(Node):
         pc_msg.height = 1
         pc_msg.width = len(packed_points)
 
-        # We have 4 float32 => x,y,z,rgb => 16 bytes total
         pc_msg.fields = [
             PointField(name='x',   offset=0,  datatype=PointField.FLOAT32, count=1),
             PointField(name='y',   offset=4,  datatype=PointField.FLOAT32, count=1),
@@ -252,43 +305,48 @@ class DualTemperaturePlot(Node):
 
         return pc_msg
 
-    def _create_bbox_line_points(self, xmin, xmax, ymin, ymax, steps=50):
+    def _create_bbox_line_points(self, xmin, xmax, ymin, ymax):
         """
-        Return points for lines around the bounding box edges, in black.
-        Each point: (x, y, z, rgbfloat).
+        Return black line points around the bounding box edges,
+        with horizontal and vertical sampling proportional to dimension.
         """
-        black_rgb_float = self._pack_rgb_to_float(0, 0, 0)
-        def segment(x1, y1, x2, y2):
+        black_rgb = self._pack_rgb_to_float(0, 0, 0)
+
+        width = abs(xmax - xmin)
+        height = abs(ymax - ymin)
+
+        steps_x = max(2, int(width * 50))
+        steps_y = max(2, int(height * 50))
+
+        def interpolate_segment(x1, y1, x2, y2, num_steps):
             seg_points = []
-            for i in range(steps+1):
-                frac = i / float(steps)
+            for i in range(num_steps+1):
+                frac = i / float(num_steps)
                 x = x1 + frac*(x2 - x1)
                 y = y1 + frac*(y2 - y1)
                 z = 0.0
-                p_bytes = struct.pack('ffff', x, y, z, black_rgb_float)
-                seg_points.append(p_bytes)
+                seg_points.append(struct.pack('ffff', x, y, z, black_rgb))
             return seg_points
 
         pts = []
         # bottom edge
-        pts += segment(xmin, ymin, xmax, ymin)
+        pts += interpolate_segment(xmin, ymin, xmax, ymin, steps_x)
         # right edge
-        pts += segment(xmax, ymin, xmax, ymax)
+        pts += interpolate_segment(xmax, ymin, xmax, ymax, steps_y)
         # top edge
-        pts += segment(xmax, ymax, xmin, ymax)
+        pts += interpolate_segment(xmax, ymax, xmin, ymax, steps_x)
         # left edge
-        pts += segment(xmin, ymax, xmin, ymin)
+        pts += interpolate_segment(xmin, ymax, xmin, ymin, steps_y)
 
         return pts
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DualTemperaturePlot()
+    node = TripleTemperaturePlot()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
