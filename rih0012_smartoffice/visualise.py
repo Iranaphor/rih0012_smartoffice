@@ -12,9 +12,9 @@ class TripleTemperaturePlot(Node):
 
         # ------------------- File / Log Setup -------------------
         self.log_filename = "plot_data_log.csv"
-        self.all_data = []  # holds (time, temperature, command, is_first_point)
+        self.all_data = []  # Holds (time, temperature, command, is_first_point)
 
-        # Load existing CSV to restore any previous "lifetime" data
+        # Load any existing CSV to restore lifetime data
         self._load_previous_data()
 
         # ------------------- ROS Setup -------------------
@@ -34,29 +34,28 @@ class TripleTemperaturePlot(Node):
         self.cloud_pub = self.create_publisher(PointCloud2, 'temperature_plot', 10)
         self.timer_ = self.create_timer(1.0, self._publish_callback)
 
-        # Node start time (not strictly required but available)
+        # Keep track of node start time if needed
         self.start_time = self.get_clock().now().nanoseconds * 1.0e-9
 
-        # Current command, next reading is "first" after command change
+        # Latch the command (default=off), next reading is first after command
         self.last_command = "off"
         self.awaiting_first_point = False
 
         # ------------------- Time Windows -------------------
         # 1) Short term: 30 minutes
-        self.short_term_window = 30.0 * 60.0   # 1800 seconds
+        self.short_term_window = 30.0 * 60.0  # 1800 seconds
         # 2) Medium term: 6 hours
-        self.mid_term_window = 6.0 * 3600.0    # 21600 seconds
+        self.mid_term_window = 6.0 * 3600.0   # 21600 seconds
+        # For the Y range of medium‐term, we use 24 hours
+        self.mid_term_Y_window = 8.0 * 3600.0  # 86400 seconds
 
         # ------------------- Bounding Boxes -------------------
-        # Format: (xmin, xmax, ymin, ymax)
-        # A) Short-term
-        self.bbox_short = (-2.1, -0.1, -1.0,  1.0)
-        # B) Medium-term
-        self.bbox_mid   = ( 0.1,  2.1, -1.0,  1.0)
-        # C) Lifetime
-        self.bbox_life  = (-2.1,  2.1, -1.7, -1.2)
+        # (xmin, xmax, ymin, ymax)
+        self.bbox_short = (-2.1, -0.1, -1.0,  1.0)  # short-term
+        self.bbox_mid   = ( 0.1,  2.1, -1.0,  1.0)  # medium-term
+        self.bbox_life  = (-2.1,  2.1, -1.7, -1.2) # lifetime
 
-        # Pre-create black line points for each box
+        # Pre-create black boundary lines for each box
         self.bbox_packed_short = self._create_bbox_line_points(*self.bbox_short)
         self.bbox_packed_mid   = self._create_bbox_line_points(*self.bbox_mid)
         self.bbox_packed_life  = self._create_bbox_line_points(*self.bbox_life)
@@ -106,7 +105,7 @@ class TripleTemperaturePlot(Node):
     # ------------------- Subscription Callbacks -------------------
     def _cmd_callback(self, msg):
         """
-        Latch the command ("on"/"off") => next Temperature is flagged as 'first_after_cmd'.
+        Latch the command ("on"/"off"), next Temperature is flagged as 'first_after_cmd'.
         """
         cmd = msg.data.strip().lower()
         if cmd in ("on", "off"):
@@ -118,7 +117,7 @@ class TripleTemperaturePlot(Node):
 
     def _temp_callback(self, msg):
         """
-        On each Temperature, record (time, temp, command, is_first) and append to CSV.
+        Store (time, temperature, command, is_first) and append to CSV.
         """
         t_now = self.get_clock().now().nanoseconds * 1.0e-9
         is_first = self.awaiting_first_point
@@ -136,28 +135,33 @@ class TripleTemperaturePlot(Node):
     # ------------------- Main Publish Timer -------------------
     def _publish_callback(self):
         """
-        Publish a PointCloud2 with:
-          - short-term data (last 30min)
-          - medium-term data (last 6hr)
-          - lifetime data (all)
-        in three bounding boxes, using fixed padding in both x and y (0.1).
+        Publish a PointCloud2 with data in three bounding boxes:
+          - short-term (30min)
+          - medium-term (6hr) with Y range from last 24hrs
+          - lifetime (all) but skipping so we have at most 100k points
         """
         if not self.all_data:
             return
 
         now_sec = self.get_clock().now().nanoseconds * 1.0e-9
 
-        # 1) short-term data
+        # 1) short-term data (30 min)
         st_data = [
             (t, temp, cmd, first)
             for (t, temp, cmd, first) in self.all_data
             if t >= now_sec - self.short_term_window
         ]
-        # 2) medium-term data
+        # 2) medium-term data (6 hr) => displayed
         mt_data = [
             (t, temp, cmd, first)
             for (t, temp, cmd, first) in self.all_data
             if t >= now_sec - self.mid_term_window
+        ]
+        # We also gather a separate set from last 24 hr for the Y range only
+        mt24_data = [
+            (t, temp, cmd, first)
+            for (t, temp, cmd, first) in self.all_data
+            if t >= now_sec - self.mid_term_Y_window
         ]
         # 3) lifetime data
         lt_data = self.all_data
@@ -165,7 +169,16 @@ class TripleTemperaturePlot(Node):
         if not (st_data or mt_data or lt_data):
             return
 
-        # Min/max for each subset
+        # --------------- Subset the lifetime data to 100k points ---------------
+        # If there's more than 100k, skip every nth
+        if len(lt_data) > 100_000:
+            step = len(lt_data) // 100_000
+            # e.g. step=2 means keep every 2nd item
+            lt_data_plot = lt_data[::step]
+        else:
+            lt_data_plot = lt_data
+
+        # Helper to find (tmin, tmax, temp_min, temp_max) from a data list
         def get_min_max(data_list):
             if not data_list:
                 return (0.0, 1.0, 0.0, 1.0)
@@ -173,26 +186,26 @@ class TripleTemperaturePlot(Node):
             temp_vals = [d[1] for d in data_list]
             return (min(t_vals), max(t_vals), min(temp_vals), max(temp_vals))
 
+        # short-term min/max
         st_tmin, st_tmax, st_temp_min, st_temp_max = get_min_max(st_data)
+        # medium-term min/max for the displayed data
         mt_tmin, mt_tmax, mt_temp_min, mt_temp_max = get_min_max(mt_data)
-        lt_tmin, lt_tmax, lt_temp_min, lt_temp_max = get_min_max(lt_data)
+        # lifetime min/max
+        lt_tmin, lt_tmax, lt_temp_min, lt_temp_max = get_min_max(lt_data_plot)
+        # but for the medium-term Y axis, we want the last 24 hr min/max
+        _, _, mt24_temp_min, mt24_temp_max = get_min_max(mt24_data)
 
-        # Start building the point list
+        # Build final list of points
         packed_points = []
-        # Add bounding-box lines
+        # Add bounding-box lines first
         packed_points.extend(self.bbox_packed_short)
         packed_points.extend(self.bbox_packed_mid)
         packed_points.extend(self.bbox_packed_life)
 
-        # --------------- Fixed 0.1 Padding in x & y ---------------
+        # --------------- Padding in x & y => 0.1 each side ---------------
         def pad_dim(low, high, pad=0.1):
-            """
-            Shift boundary by pad on each side.
-            If the dimension < 2*pad, fallback to a minimal gap of 0.01 each side.
-            """
             dim = high - low
             if dim <= 2*pad:
-                # fallback
                 return (low + 0.01, high - 0.01)
             return (low + pad, high - pad)
 
@@ -211,7 +224,7 @@ class TripleTemperaturePlot(Node):
         lf_xmin_eff, lf_xmax_eff = pad_dim(lf_xmin, lf_xmax, 0.1)
         lf_ymin_eff, lf_ymax_eff = pad_dim(lf_ymin, lf_ymax, 0.1)
 
-        # ---------- short-term data ----------
+        # ---------- Plot short-term data (30min) ----------
         for (t, temp, cmd, first_pt) in st_data:
             x = self._linear_map(t, st_tmin, st_tmax, st_xmin_eff, st_xmax_eff)
             y = self._linear_map(temp, st_temp_min, st_temp_max, st_ymin_eff, st_ymax_eff)
@@ -219,36 +232,38 @@ class TripleTemperaturePlot(Node):
             rgb = self._decide_rgb(temp, st_temp_min, st_temp_max, cmd, first_pt)
             packed_points.append(struct.pack('ffff', x, y, z, rgb))
 
-        # ---------- medium-term data ----------
+        # ---------- Plot medium-term data (6hr) ----------
+        # But y range is from the last 24 hr min/max => (mt24_temp_min..mt24_temp_max)
         for (t, temp, cmd, first_pt) in mt_data:
             x = self._linear_map(t, mt_tmin, mt_tmax, mt_xmin_eff, mt_xmax_eff)
-            y = self._linear_map(temp, mt_temp_min, mt_temp_max, mt_ymin_eff, mt_ymax_eff)
+            y = self._linear_map(temp, mt24_temp_min, mt24_temp_max, mt_ymin_eff, mt_ymax_eff)
             z = 0.01 if first_pt else 0.0
-            rgb = self._decide_rgb(temp, mt_temp_min, mt_temp_max, cmd, first_pt)
+            rgb = self._decide_rgb(temp, mt24_temp_min, mt24_temp_max, cmd, first_pt)
             packed_points.append(struct.pack('ffff', x, y, z, rgb))
 
-        # ---------- lifetime data ----------
-        for (t, temp, cmd, first_pt) in lt_data:
+        # ---------- Plot lifetime data (up to 100k) ----------
+        # We'll use the min/max from that reduced set
+        for (t, temp, cmd, first_pt) in lt_data_plot:
             x = self._linear_map(t, lt_tmin, lt_tmax, lf_xmin_eff, lf_xmax_eff)
             y = self._linear_map(temp, lt_temp_min, lt_temp_max, lf_ymin_eff, lf_ymax_eff)
             z = 0.01 if first_pt else 0.0
-            rgb = self._decide_rgb(temp, lt_temp_min, lt_temp_max, cmd, first_pt)
+            rgb = self._decide_rgb(temp, lt_temp_min, lt_temp_max, cmd, False)
             packed_points.append(struct.pack('ffff', x, y, z, rgb))
 
-        # Build and publish the PointCloud2
+        # Build & publish the PointCloud2
         pc_msg = self._create_pointcloud2(packed_points)
         self.cloud_pub.publish(pc_msg)
         self.get_logger().info(
             f"Published pointcloud: short={len(st_data)} pts, "
-            f"mid={len(mt_data)} pts, life={len(lt_data)} pts"
+            f"mid={len(mt_data)} pts, life(<=100k)={len(lt_data_plot)}"
         )
 
     # ------------------- Helper Methods -------------------
     def _decide_rgb(self, temp, tmin, tmax, cmd, is_first):
         """
-        Return a float 'rgb':
-          - If first after cmd => green if cmd='on', black if cmd='off'
-          - Else => blue->red gradient based on temp
+        Return a float 'rgb' color:
+          - If is_first => green if cmd='on', black if cmd='off'
+          - Else => blue->red gradient by temperature
         """
         if is_first:
             if cmd == "on":
@@ -261,28 +276,29 @@ class TripleTemperaturePlot(Node):
         else:
             frac = (temp - tmin) / (tmax - tmin)
             frac = max(0.0, min(1.0, frac))
-        # linear interpolation: blue(0,0,255)->red(255,0,0)
+
+        # blue(0,0,255)->red(255,0,0)
         r = int(frac * 255)
         g = 0
         b = int((1.0 - frac) * 255)
         return self._pack_rgb_to_float(r, g, b)
 
     def _pack_rgb_to_float(self, r, g, b):
-        """Convert (r,g,b) in [0..255] to a single float 'rgb' (PCL style)."""
+        """Convert (r,g,b) => single float 'rgb' (PCL style)."""
         rgb_int = (r << 16) | (g << 8) | b
         return struct.unpack('!f', struct.pack('!I', rgb_int))[0]
 
     def _linear_map(self, val, in_min, in_max, out_min, out_max):
-        """Map val from [in_min..in_max] to [out_min..out_max], handle degenerate range."""
+        """Safely map val from [in_min..in_max] -> [out_min..out_max]."""
         if abs(in_max - in_min) < 1e-9:
             return 0.5*(out_min + out_max)
         ratio = (val - in_min) / (in_max - in_min)
-        return out_min + ratio * (out_max - out_min)
+        return out_min + ratio*(out_max - out_min)
 
     def _create_pointcloud2(self, packed_points):
         """
         Return a PointCloud2 with (x,y,z,rgb) as float32.
-        That way RViz can display color with 'RGB8'.
+        That way RViz can show color with 'RGB8'.
         """
         pc_msg = PointCloud2()
         pc_msg.header.stamp = self.get_clock().now().to_msg()
@@ -308,7 +324,8 @@ class TripleTemperaturePlot(Node):
     def _create_bbox_line_points(self, xmin, xmax, ymin, ymax):
         """
         Return black line points around the bounding box edges,
-        with horizontal and vertical sampling proportional to dimension.
+        sampling more if the dimension is large (for a smoother line).
+        Each point => (float x, float y, float z, float rgb).
         """
         black_rgb = self._pack_rgb_to_float(0, 0, 0)
 
@@ -350,3 +367,8 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+
+
+
+

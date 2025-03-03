@@ -12,6 +12,8 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', [f'resource/{pkg}']),
         (f'share/{pkg}', ['package.xml']),
+        (f'share/{pkg}/config', [f'config/temperature_dashboard.rviz.yaml']),
+
     ],
     install_requires=['setuptools'],
     zip_safe=True,

@@ -12,6 +12,10 @@ init_cmd: |
   export TEMPERGOLD_DEV='/dev/tempergold'
   export SWITCHBOT_MAC='CE:2A:46:46:22:76'
 
+  # Define configuration variables
+  export RIH_PKG_SHARE=$(ros2 pkg prefix rih0012_smartoffice)/share/rih0012_smartoffice
+  export RVIZ_CONFIG="$RIH_PKG_SHARE/config/temperature_dashboard.rviz.yaml"
+
   # Define ROS2 environment variables
   export ROS_DOMAIN_ID=100
   export ROS_LOCALHOST_ONLY=1
@@ -37,7 +41,7 @@ windows:
 
 - name: visuals
   panes:
-  - rviz2
+  - rviz2 -d $RVIZ_CONFIG
   - ros2 run rih0012_smartoffice visualise.py
 
 - name: debug

@@ -24,6 +24,8 @@ class TemperatureController(Node):
         self.last_method = ''
         self.publisher = self.create_publisher(String, '/command', qos_profile)
 
+        self.sleep_range_24hr = [18,6] #6pm-6am
+
         self.lower_threshold = 24.0  # Adjust as needed
         self.upper_threshold = 25.0  # Adjust as needed
         self.get_logger().info(f'TemperatureController lower_threshold set at {self.lower_threshold}')
@@ -50,6 +52,11 @@ class TemperatureController(Node):
         time_since_publish = current_time - self.last_publish_time
         if time_since_publish < self.publish_interval:
             return  # Skip if within the interval
+
+        # Skip at night
+        now = datetime.now()
+        if now.hour >= self.sleep_range_24hr[0] or now.hour < self.sleep_range_24hr[1]:
+            return
 
         # Select appropriate action
         temperature = msg.temperature
