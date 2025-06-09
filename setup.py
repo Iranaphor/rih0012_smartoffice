@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'smart.py = rih0012_smartoffice.smart:main',
+            'schedule.py = rih0012_smartoffice.schedule:main',
             'visualise.py = rih0012_smartoffice.visualise:main'
         ],
     },

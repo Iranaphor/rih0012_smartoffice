@@ -26,7 +26,7 @@ class TripleTemperaturePlot(Node):
         )
         self.cmd_sub = self.create_subscription(
             String,
-            '/command',
+            '/switch_status',
             self._cmd_callback,
             10
         )
@@ -68,6 +68,8 @@ class TripleTemperaturePlot(Node):
         if not os.path.exists(self.log_filename):
             return
 
+        if True:
+            pass
         try:
             with open(self.log_filename, 'r') as f:
                 reader = csv.reader(f)
@@ -84,7 +86,8 @@ class TripleTemperaturePlot(Node):
                     count += 1
             self.get_logger().info(f"Loaded {count} data rows from {self.log_filename}")
         except Exception as e:
-            self.get_logger().error(f"Failed to load {self.log_filename}: {e}")
+            self.get_logger().error(f"Failed to load {self.log_filename} line {count+1}: {e}")
+            print(row)
 
     def _append_to_log_file(self, t_val, temperature, command, is_first):
         """
@@ -108,7 +111,7 @@ class TripleTemperaturePlot(Node):
         Latch the command ("on"/"off"), next Temperature is flagged as 'first_after_cmd'.
         """
         cmd = msg.data.strip().lower()
-        if cmd in ("on", "off"):
+        if cmd in ("on", "off", "fail"):
             self.last_command = cmd
             self.awaiting_first_point = True
             self.get_logger().info(f"Command latched as '{cmd}'")
@@ -268,8 +271,12 @@ class TripleTemperaturePlot(Node):
         if is_first:
             if cmd == "on":
                 return self._pack_rgb_to_float(0, 255, 0)  # green
+            elif cmd == "off":
+                return self._pack_rgb_to_float(255, 255, 0)  # pink
+            elif cmd == "fail":
+                return self._pack_rgb_to_float(0, 0, 0)  # black
             else:
-                return self._pack_rgb_to_float(0, 0, 0)    # black
+                return self._pack_rgb_to_float(255, 0, 255)  # yellow
 
         if abs(tmax - tmin) < 1e-9:
             frac = 0.5

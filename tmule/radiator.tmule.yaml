@@ -38,6 +38,7 @@ windows:
 - name: smart
   panes:
   - ros2 run rih0012_smartoffice smart.py
+  - ros2 run rih0012_smartoffice schedule.py
 
 - name: visuals
   panes:
